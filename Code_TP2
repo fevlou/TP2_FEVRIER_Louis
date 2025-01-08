@@ -1,0 +1,122 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <netdb.h>
+#include <string.h>
+#include <unistd.h>
+
+#define BUFFER_SIZE 516 
+
+int main(int argc, char **argv) {
+    printf("TFTP Client \n");
+
+    if (argc != 4) {
+        printf("Usage: %s <host> <port> <filename>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    struct addrinfo hints;
+    struct addrinfo *result;
+    memset(&hints, 0, sizeof(struct addrinfo));
+
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+
+   
+    int status = getaddrinfo(argv[1], argv[2], &hints, &result);
+    if (status != 0) {
+        perror("getaddrinfo");
+        exit(EXIT_FAILURE);
+    }
+
+    char ip_string[128] = {0};
+    char port_string[128] = {0};
+
+    getnameinfo(result->ai_addr, result->ai_addrlen,
+                ip_string, 128, port_string, 128,
+                NI_NUMERICHOST | NI_NUMERICSERV);
+
+    printf("%s is resolved at: %s:%s\n", argv[1], ip_string, port_string);
+
+    // Création socket
+    int sd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (sd == -1) {
+        perror("socket");
+        freeaddrinfo(result);
+        exit(EXIT_FAILURE);
+    }
+
+    // Création RRQ
+    char rrq[128] = {0};
+    rrq[0] = 0; 
+    rrq[1] = 1; 
+    sprintf(rrq + 2, "%s", argv[3]); 
+    sprintf(rrq + 3 + strlen(argv[3]), "octet"); 
+
+    // Envoie RRQ
+    ssize_t sent_bytes = sendto(sd, rrq, strlen(argv[3]) + 9, 0, result->ai_addr, result->ai_addrlen);
+    if (sent_bytes == -1) {
+        perror("sendto");
+        freeaddrinfo(result);
+        close(sd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Réception fichier
+    FILE *file = fopen(argv[3], "wb");
+    if (!file) {
+        perror("fopen");
+        freeaddrinfo(result);
+        close(sd);
+        exit(EXIT_FAILURE);
+    }
+
+    struct sockaddr_storage server_addr;
+    socklen_t addr_len = sizeof(server_addr);
+    char buffer[BUFFER_SIZE];
+    int block_number = 1;
+
+    while (1) {
+        // Réception data packet
+        ssize_t received_bytes = recvfrom(sd, buffer, BUFFER_SIZE, 0, (struct sockaddr *)&server_addr, &addr_len);
+        if (received_bytes == -1) {
+            perror("recvfrom");
+            fclose(file);
+            freeaddrinfo(result);
+            close(sd);
+            exit(EXIT_FAILURE);
+        }
+
+        // Vérification Data packet 
+        if (buffer[0] == 0 && buffer[1] == 3) {
+            int received_block_number = (buffer[2] << 8) | buffer[3];
+            if (received_block_number != block_number) {
+                printf("Unexpected block number. Expected: %d, Got: %d\n", block_number, received_block_number);
+                break;
+            }
+
+            // Ecriture du fichier
+            fwrite(buffer + 4, 1, received_bytes - 4, file);
+
+            // Envoie ACK
+            char ack[4] = {0, 4, buffer[2], buffer[3]};
+            sendto(sd, ack, 4, 0, (struct sockaddr *)&server_addr, addr_len);
+
+            // Vérification envoie
+            if (received_bytes < BUFFER_SIZE) {
+                printf("File transfer complete.\n");
+                break;
+            }
+
+            block_number++;
+        } else {
+            printf("Unexpected packet received. Ignored.\n");
+        }
+    }
+
+    fclose(file);
+    freeaddrinfo(result);
+    close(sd);
+
+    return 0;
+}
